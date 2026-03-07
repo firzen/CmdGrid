@@ -120,7 +120,6 @@ MIT License
 
 ### 💡 Tips / 提示
 
-    某些应用程序可能需要管理员权限才能被最小化。强烈建议以管理员身份运行 `arrange_cmds.py`。
 
 *   **Multiple Monitors / 多显示器**: Currently supports the primary monitor's work area.
     目前主要支持主显示器的工作区域。
