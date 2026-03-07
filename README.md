@@ -27,7 +27,7 @@
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/YOUR_USERNAME/CmdGrid.git
+    git clone https://github.com/firzen/CmdGrid.git
     cd CmdGrid
     ```
 
@@ -85,7 +85,7 @@ MIT License
 
 1.  **克隆仓库**:
     ```bash
-    git clone https://github.com/YOUR_USERNAME/CmdGrid.git
+    git clone https://github.com/firzen/CmdGrid.git
     cd CmdGrid
     ```
 
