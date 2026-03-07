@@ -120,7 +120,6 @@ MIT License
 
 ### 💡 Tips / 提示
 
-*   **Admin Rights / 管理员权限**: Some applications may require administrator privileges to be minimized. Running `arrange_cmds.py` as Administrator is highly recommended.
     某些应用程序可能需要管理员权限才能被最小化。强烈建议以管理员身份运行 `arrange_cmds.py`。
 
 *   **Multiple Monitors / 多显示器**: Currently supports the primary monitor's work area.
