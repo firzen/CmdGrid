@@ -7,163 +7,139 @@ import ctypes
 import os
 from ctypes import wintypes
 
-# 定义 SPI_GETWORKAREA 常量
-SPI_GETWORKAREA = 48
+# --- 配置 ---
+USER32 = ctypes.windll.user32
+KERNEL32 = ctypes.windll.kernel32
 
-def get_current_console_hwnd():
-    """获取当前脚本运行的控制台窗口句柄。"""
+def minimize_self_immediately():
+    """尝试立即最小化当前脚本所在的控制台窗口，并返回其句柄。"""
     current_pid = os.getpid()
-    found_hwnd = None
+    hwnd = None
     
-    def enum_callback(hwnd, _):
-        nonlocal found_hwnd
-        try:
-            if win32gui.IsWindowVisible(hwnd):
-                _, window_pid = win32api.GetWindowThreadProcessId(hwnd)
-                if window_pid == current_pid:
-                    class_name = win32gui.GetClassName(hwnd)
-                    if class_name == "ConsoleWindowClass":
-                        found_hwnd = hwnd
-                        return False
-        except Exception:
-            pass
-        return True
+    # 方法 1: GetConsoleWindow (适用于独立 cmd.exe)
+    try:
+        hwnd = KERNEL32.GetConsoleWindow()
+        if hwnd:
+            pid = wintypes.DWORD()
+            USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == current_pid:
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                return hwnd 
+    except Exception:
+        pass
 
-    win32gui.EnumWindows(enum_callback, None)
-    return found_hwnd
-
-def get_cmd_windows(exclude_hwnd=None):
-    """获取所有可见的 CMD 窗口句柄列表（可排除指定句柄）。"""
-    hwnds = []
+    # 方法 2: 枚举查找 (备用)
+    target_classes = ["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"]
+    found_hwnds = []
     
     def enum_callback(hwnd, results):
-        if win32gui.IsWindowVisible(hwnd):
-            try:
+        if not win32gui.IsWindowVisible(hwnd): return True
+        try:
+            pid = wintypes.DWORD()
+            USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == current_pid:
                 class_name = win32gui.GetClassName(hwnd)
-                if class_name == "ConsoleWindowClass":
-                    if exclude_hwnd and hwnd == exclude_hwnd:
-                        return True
+                if class_name in target_classes:
                     results.append(hwnd)
-            except Exception:
-                pass
+        except: pass
         return True
 
+    win32gui.EnumWindows(enum_callback, found_hwnds)
+    
+    if found_hwnds:
+        h = found_hwnds[0]
+        win32gui.ShowWindow(h, win32con.SW_MINIMIZE)
+        return h
+    
+    return None
+
+def get_cmd_windows(exclude_hwnd=None):
+    """获取所有可见的 CMD/PowerShell 窗口，排除指定句柄。"""
+    hwnds = []
+    def enum_callback(hwnd, results):
+        if not win32gui.IsWindowVisible(hwnd): return True
+        try:
+            class_name = win32gui.GetClassName(hwnd)
+            if class_name in ["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"]:
+                if exclude_hwnd and hwnd == exclude_hwnd: return True
+                if win32gui.GetWindowText(hwnd): # 确保有标题
+                    results.append(hwnd)
+        except: pass
+        return True
     win32gui.EnumWindows(enum_callback, hwnds)
     return hwnds
 
 def minimize_other_windows(protected_hwnds):
-    """最小化所有不在保护列表中的可见窗口。"""
-    print("正在清理桌面：最小化无关窗口...")
+    """最小化所有非 CMD 且非保护的窗口。"""
     count = 0
-    protected_set = set(protected_hwnds)
-    
-    system_classes = {"Shell_TrayWnd", "Progman", "WorkerW", "IME", "MSCTFIME UI"}
+    protected_set = set(protected_hwnds) if protected_hwnds else set()
+    system_classes = {"Shell_TrayWnd", "Progman", "WorkerW", "IME", "MSCTFIME UI", "ApplicationFrameHost"}
 
     def enum_callback(hwnd, _):
-        if not win32gui.IsWindowVisible(hwnd):
-            return True
+        if not win32gui.IsWindowVisible(hwnd): return True
         try:
-            if hwnd in protected_set:
-                return True
+            if hwnd in protected_set: return True
             class_name = win32gui.GetClassName(hwnd)
-            if class_name in system_classes:
-                return True
+            if class_name in system_classes: return True
+            # 如果是 CMD 窗口，保留（留给排列函数处理）
+            if class_name in ["ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"]: return True
             
             win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
             nonlocal count
             count += 1
-        except Exception:
-            pass
+        except: pass
         return True
 
     win32gui.EnumWindows(enum_callback, None)
-    print(f"已最小化 {count} 个无关窗口。")
-    time.sleep(0.5) 
+    return count
 
-def get_work_area_ctypes():
-    """使用 ctypes 获取屏幕工作区。"""
+def get_work_area():
     rect = ctypes.wintypes.RECT()
-    result = ctypes.windll.user32.SystemParametersInfoA(
-        SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
-    )
-    if not result:
-        raise RuntimeError("调用 SystemParametersInfo 失败")
-    return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    if USER32.SystemParametersInfoA(48, 0, ctypes.byref(rect), 0):
+        return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+    return 0, 0, win32api.GetSystemMetrics(win32con.SM_CXSCREEN), win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
 
 def arrange_windows_grid(hwnds, max_rows=5):
-    """
-    将窗口排列成网格。
-    优化逻辑：动态计算行数，优先铺满垂直空间，避免窗口过小。
-    :param hwnds: 窗口句柄列表
-    :param max_rows: 允许的最大行数，防止窗口变得太扁
-    """
     if not hwnds:
         print("没有需要排列的 CMD 窗口。")
         return
 
     count = len(hwnds)
-    print(f"准备排列 {count} 个 CMD 窗口。")
+    # 注意：这里的 count 是包含第一个窗口的总数，但实际排列数会少 1
+    actual_count = count - 1 if count > 0 else 0
+    
+    if actual_count <= 0:
+        print("排除第一个窗口后，没有剩余窗口需要排列。")
+        return
 
-    # --- [核心优化] 动态计算行数 (Rows) 和列数 (Cols) ---
-    
-    # 策略：
-    # 1. 计算理想的正方形边长 sqrt(count)
-    # 2. 尝试减少行数，让列数增加，从而增加每个窗口的高度，直到行数达到下限或列数过多
-    # 简单策略：根据数量区间固定行数，但允许在区间内动态调整以铺满
-    
-    # 基础行数估算 (向下取整的平方根，或者根据区间)
-    # 如果 count=10, sqrt=3.16. 
-    # 方案 A (原逻辑): 4x4 (浪费空间)
-    # 方案 B (新逻辑): 3 行 -> ceil(10/3)=4 列 (3x4=12 格子，只空 2 格，高度增加)
-    
-    base_sqrt = math.sqrt(count)
-    
-    # 确定行数：
-    # 如果数量很少，至少 1 行。
-    # 我们希望行数尽可能少（以增加高度），但不能让列数无限多（导致窗口太窄）。
-    # 限制：行数 <= max_rows, 且 行数 >= 1
-    # 算法：从 ceil(sqrt(count)) 开始尝试减少行数，直到 (count / rows) 的列宽看起来合理？
-    # 更简单的启发式算法：
-    # 如果 count <= 4: 1 行 or 2 行? -> 2 行比较稳，除非只有 1 个
-    # 如果 count <= 9: 3 行
-    # 如果 count <= 16: 4 行
-    # 如果 count <= 25: 5 行
-    # 修正：如果 count=10，按上面是 4 行。但我们希望它是 3 行。
-    # 规则：如果 count > (rows-1)^2 且 count <= rows^2:
-    #       如果 count 接近 (rows-1)*rows，则使用 rows-1 行。
-    
+    print(f"准备排列 {actual_count} 个 CMD 窗口 (已排除第 1 个)。")
+
+    # --- 智能计算行数 (基于实际排列数量) ---
+    # 使用 actual_count 来计算网格，避免因为排除了一个窗口导致网格过大或过小
+    base_sqrt = math.sqrt(actual_count)
     rows = math.ceil(base_sqrt)
     if rows > max_rows:
         rows = max_rows
     
-    # 优化检查：如果当前行数下，最后一行空的太多，尝试减少一行
-    # 例如：10 个窗口，rows=4 (4x4=16, 空 6 个). 
-    # 尝试 rows=3 (3x4=12, 空 2 个). 显然 3 行更好。
-    # 条件：如果 (rows * (rows-1)) >= count，说明减少一行也能装下，且利用率更高（窗口更高）
+    # 优化行数逻辑 (同之前版本)
     if rows > 1:
-        if (rows - 1) * math.ceil(count / (rows - 1)) >= count: 
-            # 这里逻辑稍微修正：只要 (rows-1) 行能装下（即 cols 增加一点但总格子够），就减少行数
-            # 实际上只要 count <= (rows-1) * some_col，我们想最大化高度。
-            # 最简单的判断：如果 count <= rows * (rows - 1)，那么用 rows-1 行会更紧凑且更高。
-            # 例：10 <= 4*3 (12)? 是的。所以用 3 行。
-            # 例：13 <= 4*3 (12)? 否。必须用 4 行。
-            if count <= rows * (rows - 1):
-                rows -= 1
-
-    # 确保不超过最大限制
+        if actual_count <= rows * (rows - 1):
+            rows -= 1
     if rows > max_rows:
         rows = max_rows
         
-    # 计算列数
-    cols = math.ceil(count / rows)
+    cols = math.ceil(actual_count / rows)
+    
+    # 防止列数为 0 (虽然 actual_count > 0 保证了这点)
+    if cols == 0: cols = 1
 
-    print(f"智能布局计算：{count} 个窗口 -> {rows} 行 x {cols} 列 (最大化窗口高度)")
+    print(f"智能布局计算：{actual_count} 个窗口 -> {rows} 行 x {cols} 列")
 
     # 获取工作区
     try:
         start_x, start_y, work_width, work_height = get_work_area_ctypes()
     except Exception as e:
-        print(f"获取工作区失败: {e}, 使用全屏。")
+        print(f"获取工作区失败: {e}")
         start_x, start_y = 0, 0
         work_width = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
         work_height = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
@@ -181,9 +157,21 @@ def arrange_windows_grid(hwnds, max_rows=5):
 
     print(f"单个窗口尺寸：{cell_width}x{cell_height}")
 
+    # --- 核心修改：遍历并跳过第一个 ---
     for index, hwnd in enumerate(hwnds):
-        row = index // cols
-        col = index % cols
+        # 【新增】如果是第一个窗口 (index 0)，直接跳过，不排列
+        if index == 0:
+            # 可选：如果你想让被跳过的窗口保持最小化，可以在这里加一行代码
+            # win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+            continue 
+
+        # 计算当前是第几个被排列的窗口 (用于日志和坐标计算)
+        # 因为跳过了 index 0，所以当前的逻辑序号应该是 index - 1
+        current_arrange_index = index - 1
+        
+        row = current_arrange_index // cols
+        col = current_arrange_index % cols
+        
         x = start_x + margin + (col * cell_width)
         y = start_y + margin + (row * cell_height)
         
@@ -195,70 +183,42 @@ def arrange_windows_grid(hwnds, max_rows=5):
                 hwnd, win32con.HWND_TOP, x, y, cell_width, cell_height,
                 win32con.SWP_NOZORDER | win32con.SWP_SHOWWINDOW
             )
+            
             title = win32gui.GetWindowText(hwnd)
-            # 仅打印前几个窗口的详细信息，避免刷屏
-            if index < 5 or index == count - 1:
-                print(f"  [{index+1}] {title[:20]}...")
-            elif index == 5:
-                print(f"  ... (剩余 {count-6} 个窗口已排列)")
+            
+            # 日志输出优化：基于 current_arrange_index 计数
+            if current_arrange_index < 4 or current_arrange_index == actual_count - 1:
+                print(f"  [{current_arrange_index+1}] {title[:25]}...")
+            elif current_arrange_index == 4:
+                print(f"  ... (剩余 {actual_count-5} 个窗口已排列)")
                 
         except Exception as e:
-            print(f"  [{index+1}] 失败: {e}")
+            print(f"  [{current_arrange_index+1}] 失败: {e}")
 
 def main():
-    print("="*30)
-    print("CmdGrid - 智能窗口排列")
-    print("="*30)
-    
-    # 1. 获取脚本自身窗口
-    script_hwnd = get_current_console_hwnd()
-    
-    # 2. 获取其他 CMD 窗口 (排除脚本窗口)
-    target_windows = get_cmd_windows(exclude_hwnd=script_hwnd)
-    
-    if not target_windows:
-        msg = "未找到其他 CMD 窗口。"
-        if script_hwnd:
-            msg += "\n(当前只有脚本窗口自己)"
-        print(msg)
+    # 1. 最小化自己
+    self_hwnd = minimize_self_immediately()
+    time.sleep(0.2)
+
+    # 2. 获取其他 CMD
+    targets = get_cmd_windows(exclude_hwnd=self_hwnd)
+    if not targets:
+        print("未找到其他 CMD 窗口。")
         return
 
-    # 3. 暂时最小化脚本窗口
-    script_was_minimized = False
-    if script_hwnd:
-        print("正在暂时最小化脚本窗口...")
-        win32gui.ShowWindow(script_hwnd, win32con.SW_MINIMIZE)
-        script_was_minimized = True
-        time.sleep(0.3)
+    # 3. 清理桌面
+    cnt = minimize_other_windows(targets)
+    if cnt > 0:
+        print(f"已最小化 {cnt} 个无关窗口。")
 
-    try:
-        # 4. 构建保护列表
-        protected_list = target_windows.copy()
-        
-        # 5. 最小化其他所有无关窗口
-        minimize_other_windows(protected_list)
-
-        # 6. 排列目标 CMD 窗口 (应用新的智能网格逻辑)
-        arrange_windows_grid(target_windows, max_rows=5)
-        
-    finally:
-        # 7. 还原脚本窗口
-        if script_was_minimized and script_hwnd:
-            print("\n正在还原脚本窗口...")
-            time.sleep(0.5)
-            win32gui.ShowWindow(script_hwnd, win32con.SW_RESTORE)
-            win32gui.SetForegroundWindow(script_hwnd)
-            print("脚本窗口已还原。")
-
-    print("="*30)
+    # 4. 排列
+    print(f"正在排列 {len(targets)} 个 CMD 窗口...")
+    arrange_windows_grid(targets, max_rows=5)
     print("完成！")
-    print("="*30)
 
 if __name__ == "__main__":
     try:
         if not ctypes.windll.shell32.IsUserAnAdmin():
             print("提示：建议以管理员身份运行。")
-    except:
-        pass
-        
+    except: pass
     main()
